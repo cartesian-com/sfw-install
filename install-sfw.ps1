@@ -10,6 +10,9 @@ param(
     [switch]$ci
 )
 
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+
+
 $Version = $env:SFW_VERSION  # Will be fetched from latest release if not set
 $InstallDir = Join-Path $env:USERPROFILE ".sfw\bin"
 $RepoUrl = "https://github.com/SocketDev/sfw-free"
