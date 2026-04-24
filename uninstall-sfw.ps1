@@ -26,7 +26,8 @@ function Write-Warn {
 function Write-Error-Custom {
     param([string]$Message)
     Write-Host "[ERROR] $Message" -ForegroundColor Red
-    exit 1
+    $global:LASTEXITCODE = 1
+    throw $Message
 }
 
 # Check and uninstall npm global package if present
@@ -201,8 +202,8 @@ try {
     Uninstall-Sfw
     # npm/volta list commands leak non-zero $LASTEXITCODE when packages are
     # absent; that's expected, not a failure. Force a clean exit so callers
-    # can rely on 0 = success.
-    exit 0
+    # can rely on 0 = success without exiting an interactive iex session.
+    $global:LASTEXITCODE = 0
 }
 catch {
     Write-Error-Custom "Uninstallation failed: $_"
