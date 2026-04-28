@@ -1,11 +1,10 @@
 # Uninstalls Socket Firewall (sfw) from Windows AVD / multi-user hosts.
 #
 # Removes the machine-scoped install created by install-sfw-avd.ps1:
-#   - removes sfw shim and binary directories from the machine PATH
+#   - removes sfw directories from the machine PATH
+#   - removes all-users PowerShell profile shims
+#   - removes HKLM cmd.exe AutoRun shims
 #   - deletes the Program Files install directory
-#
-# It also removes legacy all-users PowerShell and HKLM cmd.exe AutoRun shims
-# created by earlier AVD installer drafts.
 #
 # Run from an elevated PowerShell session.
 
@@ -14,8 +13,8 @@ $ErrorActionPreference = "Stop"
 $NativeProgramFiles = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
 $InstallRoot = Join-Path $NativeProgramFiles "Socket Firewall"
 $BinDir = Join-Path $InstallRoot "bin"
-$ShimDir = Join-Path $InstallRoot "shims"
-$LegacyCmdShim = Join-Path $BinDir "sfw-shims.cmd"
+$LegacyShimDir = Join-Path $InstallRoot "shims"
+$CmdShimPath = Join-Path $BinDir "sfw-shims.cmd"
 
 function Write-Info {
     param([string]$Message)
@@ -55,15 +54,17 @@ function Normalize-PathEntry {
     return $PathEntry.Trim().Trim('"').TrimEnd('\').ToLowerInvariant()
 }
 
-function Get-PathWithoutSfw {
-    param([string]$PathValue)
+function Get-PathWithoutEntries {
+    param(
+        [string]$PathValue,
+        [string[]]$Dirs
+    )
 
     if (-not $PathValue) { return "" }
 
-    $remove = @($ShimDir, $BinDir)
     $removeKeys = @{}
-    foreach ($path in $remove) {
-        $removeKeys[(Normalize-PathEntry $path)] = $true
+    foreach ($dir in $Dirs) {
+        $removeKeys[(Normalize-PathEntry $dir)] = $true
     }
 
     $existing = $PathValue.Split(';', [StringSplitOptions]::RemoveEmptyEntries)
@@ -84,18 +85,18 @@ function Remove-FromMachinePath {
         return
     }
 
-    $newPath = Get-PathWithoutSfw $current
+    $newPath = Get-PathWithoutEntries -PathValue $current -Dirs @($BinDir, $LegacyShimDir)
     if ($newPath -ne $current) {
         [Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
-        $env:Path = Get-PathWithoutSfw $env:Path
-        Write-Info "Removed sfw shim and binary directories from machine PATH"
+        $env:Path = Get-PathWithoutEntries -PathValue $env:Path -Dirs @($BinDir, $LegacyShimDir)
+        Write-Info "Removed sfw directories from machine PATH"
     }
     else {
-        Write-Info "sfw shim and binary directories were not present in machine PATH"
+        Write-Info "sfw directories were not present in machine PATH"
     }
 }
 
-function Get-LegacyAllUsersPowerShellProfilePaths {
+function Get-AllUsersPowerShellProfilePaths {
     $paths = New-Object System.Collections.Generic.List[string]
 
     if ($PROFILE.AllUsersAllHosts) {
@@ -129,11 +130,11 @@ function Get-LegacyAllUsersPowerShellProfilePaths {
     }
 }
 
-function Remove-LegacyPowerShellProfileShims {
+function Remove-PowerShellProfileShims {
     $marker = "# >>> socket sfw avd shims >>>"
     $endMarker = "# <<< socket sfw avd shims <<<"
 
-    foreach ($profilePath in Get-LegacyAllUsersPowerShellProfilePaths) {
+    foreach ($profilePath in Get-AllUsersPowerShellProfilePaths) {
         if (-not (Test-Path $profilePath)) {
             continue
         }
@@ -148,16 +149,16 @@ function Remove-LegacyPowerShellProfileShims {
 
         if ([string]::IsNullOrWhiteSpace($updated)) {
             Remove-Item -Path $profilePath -Force
-            Write-Info "Removed now-empty legacy all-users PowerShell profile: $profilePath"
+            Write-Info "Removed now-empty all-users PowerShell profile: $profilePath"
         }
         else {
             Set-Content -Path $profilePath -Value $updated -Encoding UTF8 -NoNewline
-            Write-Info "Removed legacy sfw block from all-users PowerShell profile: $profilePath"
+            Write-Info "Removed sfw block from all-users PowerShell profile: $profilePath"
         }
     }
 }
 
-function Remove-LegacyCommandProcessorAutoRun {
+function Remove-CommandProcessorAutoRun {
     param([Microsoft.Win32.RegistryView]$RegistryView)
 
     $autoRunName = "AutoRun"
@@ -183,7 +184,7 @@ function Remove-LegacyCommandProcessorAutoRun {
             return
         }
 
-        $escaped = [regex]::Escape($LegacyCmdShim)
+        $escaped = [regex]::Escape($CmdShimPath)
         $pattern = "(?i)\s*&?\s*CALL\s+`"$escaped`"\s*&?"
         $newValue = [regex]::Replace($currentAutoRun, $pattern, "").Trim().Trim('&').Trim()
 
@@ -193,11 +194,11 @@ function Remove-LegacyCommandProcessorAutoRun {
 
         if ([string]::IsNullOrWhiteSpace($newValue)) {
             $key.DeleteValue($autoRunName, $false)
-            Write-Info "Removed legacy sfw entry from machine cmd.exe AutoRun ($RegistryView)"
+            Write-Info "Removed sfw entry from machine cmd.exe AutoRun ($RegistryView)"
         }
         else {
             $key.SetValue($autoRunName, $newValue, [Microsoft.Win32.RegistryValueKind]::String)
-            Write-Info "Removed legacy sfw entry from machine cmd.exe AutoRun ($RegistryView)"
+            Write-Info "Removed sfw entry from machine cmd.exe AutoRun ($RegistryView)"
         }
     }
     finally {
@@ -206,13 +207,13 @@ function Remove-LegacyCommandProcessorAutoRun {
     }
 }
 
-function Remove-LegacyCmdShims {
+function Remove-CmdShims {
     if ([Environment]::Is64BitOperatingSystem) {
-        Remove-LegacyCommandProcessorAutoRun -RegistryView Registry64
-        Remove-LegacyCommandProcessorAutoRun -RegistryView Registry32
+        Remove-CommandProcessorAutoRun -RegistryView Registry64
+        Remove-CommandProcessorAutoRun -RegistryView Registry32
     }
     else {
-        Remove-LegacyCommandProcessorAutoRun -RegistryView Registry32
+        Remove-CommandProcessorAutoRun -RegistryView Registry32
     }
 }
 
@@ -224,7 +225,7 @@ function Remove-InstallDirectory {
 
     $programFilesFull = [System.IO.Path]::GetFullPath($NativeProgramFiles).TrimEnd('\')
     $installRootFull = [System.IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
-    $expectedRoot = Join-Path $programFilesFull "Socket Firewall"
+    $expectedRoot = (Join-Path $programFilesFull "Socket Firewall").TrimEnd('\')
 
     if ($installRootFull -ne $expectedRoot) {
         Write-Error-Custom "Refusing to remove unexpected install path: $installRootFull"
@@ -239,17 +240,10 @@ function Uninstall-SfwAvd {
     Assert-Administrator
 
     Remove-FromMachinePath
-
-    try {
-        Remove-LegacyPowerShellProfileShims
-        Remove-LegacyCmdShims
-    }
-    catch {
-        Write-Warn "Legacy shim cleanup encountered issues: $_"
-        Write-Warn "Continuing with PATH-wrapper uninstallation."
-    }
-
+    Remove-PowerShellProfileShims
+    Remove-CmdShims
     Remove-InstallDirectory
+
     Write-Info "AVD uninstallation complete."
 }
 

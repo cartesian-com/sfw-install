@@ -1,12 +1,10 @@
 # Downloads and installs Socket Firewall (sfw) for Windows AVD / multi-user hosts.
 #
-# This installer is machine-scoped and uses PATH wrappers only:
+# This installer is machine-scoped:
 #   - installs sfw.exe under Program Files
-#   - writes package-manager wrappers under Program Files
-#   - prepends the wrapper and sfw directories to the machine PATH
-#
-# The wrappers locate the real package-manager command at runtime, skip the
-# wrapper itself, and pass the real command's absolute path to sfw.
+#   - adds sfw.exe's directory to the machine PATH
+#   - installs PowerShell shims in all-users profiles
+#   - registers cmd.exe doskey shims through HKLM Command Processor AutoRun
 #
 # Run from an elevated PowerShell session.
 # Usage: iex (iwr https://raw.githubusercontent.com/.../install-sfw-avd.ps1 -UseBasicParsing)
@@ -17,9 +15,9 @@ $Version = $env:SFW_VERSION  # Will be fetched from latest release if not set.
 $NativeProgramFiles = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
 $InstallRoot = Join-Path $NativeProgramFiles "Socket Firewall"
 $BinDir = Join-Path $InstallRoot "bin"
-$ShimDir = Join-Path $InstallRoot "shims"
+$LegacyShimDir = Join-Path $InstallRoot "shims"
 $SfwPath = Join-Path $BinDir "sfw.exe"
-$LegacyCmdShim = Join-Path $BinDir "sfw-shims.cmd"
+$CmdShimPath = Join-Path $BinDir "sfw-shims.cmd"
 $RepoUrl = "https://github.com/SocketDev/sfw-free"
 $ApiUrl = "https://api.github.com/repos/SocketDev/sfw-free/releases/latest"
 $Managers = @("npm", "yarn", "pnpm", "pip", "uv", "cargo")
@@ -129,193 +127,74 @@ function Test-VersionInstalled {
     return $requestedClean -eq $installedClean
 }
 
-function New-InstallDirectories {
-    foreach ($dir in @($BinDir, $ShimDir)) {
-        if (-not (Test-Path $dir)) {
-            Write-Info "Creating directory: $dir"
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
-        }
-    }
-}
-
 function Normalize-PathEntry {
     param([string]$PathEntry)
 
     return $PathEntry.Trim().Trim('"').TrimEnd('\').ToLowerInvariant()
 }
 
-function Get-PathWithSfwFirst {
-    param([string]$PathValue)
+function Get-PathWithoutEntries {
+    param(
+        [string]$PathValue,
+        [string[]]$Dirs
+    )
 
-    if (-not $PathValue) { $PathValue = "" }
+    if (-not $PathValue) { return "" }
 
-    $preferred = @($ShimDir, $BinDir)
-    $preferredKeys = @{}
-    foreach ($path in $preferred) {
-        $preferredKeys[(Normalize-PathEntry $path)] = $true
+    $removeKeys = @{}
+    foreach ($dir in $Dirs) {
+        $removeKeys[(Normalize-PathEntry $dir)] = $true
     }
 
     $existing = $PathValue.Split(';', [StringSplitOptions]::RemoveEmptyEntries)
     $filtered = foreach ($entry in $existing) {
         $key = Normalize-PathEntry $entry
-        if (-not $preferredKeys.ContainsKey($key)) {
+        if (-not $removeKeys.ContainsKey($key)) {
             $entry
         }
     }
 
-    $newParts = @($ShimDir, $BinDir) + @($filtered)
-    return ($newParts -join ';')
+    return (@($filtered) -join ';')
+}
+
+function Get-PathWithBinFirst {
+    param([string]$PathValue)
+
+    $withoutSfw = Get-PathWithoutEntries -PathValue $PathValue -Dirs @($BinDir, $LegacyShimDir)
+    $parts = @($BinDir)
+    if (-not [string]::IsNullOrWhiteSpace($withoutSfw)) {
+        $parts += $withoutSfw.Split(';', [StringSplitOptions]::RemoveEmptyEntries)
+    }
+
+    return ($parts -join ';')
 }
 
 function Set-MachinePathForSfw {
     $current = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $newPath = Get-PathWithSfwFirst $current
+    $newPath = Get-PathWithBinFirst $current
 
     if ($newPath -ne $current) {
         [Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
-        Write-Info "Prepended sfw shim and binary directories to machine PATH"
+        Write-Info "Added $BinDir to machine PATH and removed legacy wrapper PATH entries"
     }
     else {
-        Write-Info "sfw shim and binary directories are already first on machine PATH"
+        Write-Info "$BinDir is already first on machine PATH"
     }
 
-    $env:Path = Get-PathWithSfwFirst $env:Path
+    $env:Path = Get-PathWithBinFirst $env:Path
 }
 
-function Get-LegacyAllUsersPowerShellProfilePaths {
-    $paths = New-Object System.Collections.Generic.List[string]
-
-    if ($PROFILE.AllUsersAllHosts) {
-        $paths.Add($PROFILE.AllUsersAllHosts)
-    }
-
-    $nativeWindowsPowerShellRoot = if (Test-Path (Join-Path $env:WINDIR "Sysnative\WindowsPowerShell\v1.0")) {
-        Join-Path $env:WINDIR "Sysnative\WindowsPowerShell\v1.0"
-    }
-    else {
-        Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0"
-    }
-
-    $knownProfileRoots = @(
-        $nativeWindowsPowerShellRoot,
-        (Join-Path $env:WINDIR "SysWOW64\WindowsPowerShell\v1.0"),
-        (Join-Path $NativeProgramFiles "PowerShell\7")
-    )
-
-    foreach ($root in $knownProfileRoots) {
-        $paths.Add((Join-Path $root "profile.ps1"))
-    }
-
-    $seen = @{}
-    foreach ($path in $paths) {
-        $key = $path.ToLowerInvariant()
-        if (-not $seen.ContainsKey($key)) {
-            $seen[$key] = $true
-            $path
-        }
+function Remove-LegacyPathWrappers {
+    if (Test-Path $LegacyShimDir) {
+        Remove-Item -Path $LegacyShimDir -Recurse -Force
+        Write-Info "Removed legacy PATH wrapper directory: $LegacyShimDir"
     }
 }
 
-function Remove-LegacyPowerShellProfileShims {
-    $marker = "# >>> socket sfw avd shims >>>"
-    $endMarker = "# <<< socket sfw avd shims <<<"
-
-    foreach ($profilePath in Get-LegacyAllUsersPowerShellProfilePaths) {
-        if (-not (Test-Path $profilePath)) {
-            continue
-        }
-
-        $existing = Get-Content $profilePath -Raw
-        if ($existing -notmatch [regex]::Escape($marker)) {
-            continue
-        }
-
-        $pattern = "(?s)\r?\n?\s*" + [regex]::Escape($marker) + ".*?" + [regex]::Escape($endMarker) + "\s*\r?\n?"
-        $updated = [regex]::Replace($existing, $pattern, "`r`n").TrimEnd() + "`r`n"
-
-        if ([string]::IsNullOrWhiteSpace($updated)) {
-            Remove-Item -Path $profilePath -Force
-            Write-Info "Removed now-empty legacy all-users PowerShell profile: $profilePath"
-        }
-        else {
-            Set-Content -Path $profilePath -Value $updated -Encoding UTF8 -NoNewline
-            Write-Info "Removed legacy sfw block from all-users PowerShell profile: $profilePath"
-        }
-    }
-}
-
-function Remove-LegacyCommandProcessorAutoRun {
-    param([Microsoft.Win32.RegistryView]$RegistryView)
-
-    $autoRunName = "AutoRun"
-    $baseKey = $null
-    $key = $null
-
-    try {
-        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
-            [Microsoft.Win32.RegistryHive]::LocalMachine,
-            $RegistryView
-        )
-        $key = $baseKey.OpenSubKey("Software\Microsoft\Command Processor", $true)
-        if (-not $key) {
-            return
-        }
-
-        $currentAutoRun = [string]$key.GetValue(
-            $autoRunName,
-            $null,
-            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
-        )
-        if (-not $currentAutoRun) {
-            return
-        }
-
-        $escaped = [regex]::Escape($LegacyCmdShim)
-        $pattern = "(?i)\s*&?\s*CALL\s+`"$escaped`"\s*&?"
-        $newValue = [regex]::Replace($currentAutoRun, $pattern, "").Trim().Trim('&').Trim()
-
-        if ($newValue -eq $currentAutoRun) {
-            return
-        }
-
-        if ([string]::IsNullOrWhiteSpace($newValue)) {
-            $key.DeleteValue($autoRunName, $false)
-            Write-Info "Removed legacy sfw entry from machine cmd.exe AutoRun ($RegistryView)"
-        }
-        else {
-            $key.SetValue($autoRunName, $newValue, [Microsoft.Win32.RegistryValueKind]::String)
-            Write-Info "Removed legacy sfw entry from machine cmd.exe AutoRun ($RegistryView)"
-        }
-    }
-    finally {
-        if ($key) { $key.Close() }
-        if ($baseKey) { $baseKey.Close() }
-    }
-}
-
-function Remove-LegacyCmdShims {
-    if ([Environment]::Is64BitOperatingSystem) {
-        Remove-LegacyCommandProcessorAutoRun -RegistryView Registry64
-        Remove-LegacyCommandProcessorAutoRun -RegistryView Registry32
-    }
-    else {
-        Remove-LegacyCommandProcessorAutoRun -RegistryView Registry32
-    }
-}
-
-function Remove-LegacyAvdShims {
-    try {
-        Remove-LegacyPowerShellProfileShims
-        Remove-LegacyCmdShims
-
-        if (Test-Path $LegacyCmdShim) {
-            Remove-Item -Path $LegacyCmdShim -Force
-            Write-Info "Removed legacy cmd.exe shim script: $LegacyCmdShim"
-        }
-    }
-    catch {
-        Write-Warn "Legacy AVD shim cleanup encountered issues: $_"
-        Write-Warn "Continuing with PATH-wrapper installation."
+function New-InstallDirectory {
+    if (-not (Test-Path $BinDir)) {
+        Write-Info "Creating installation directory: $BinDir"
+        New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     }
 }
 
@@ -366,94 +245,150 @@ function Install-SfwBinary {
     }
 }
 
-function New-WrapperContent {
-    param([string]$Manager)
+function Get-AllUsersPowerShellProfilePaths {
+    $paths = New-Object System.Collections.Generic.List[string]
 
-    $template = @'
-@echo off
-setlocal EnableExtensions DisableDelayedExpansion
-set "SFW_EXE=__SFW_EXE__"
-set "SHIM_DIR=__SHIM_DIR__"
-set "TARGET_NAME=__TARGET_NAME__"
-set "SELF=%~f0"
-set "SELF_SHORT=%~fs0"
-set "TARGET_EXE="
-set "FALLBACK_EXE="
+    if ($PROFILE.AllUsersAllHosts) {
+        $paths.Add($PROFILE.AllUsersAllHosts)
+    }
 
-if not exist "%SFW_EXE%" (
-    echo [ERROR] Socket Firewall executable not found: %SFW_EXE% 1>&2
-    exit /b 1
-)
+    $nativeWindowsPowerShellRoot = if (Test-Path (Join-Path $env:WINDIR "Sysnative\WindowsPowerShell\v1.0")) {
+        Join-Path $env:WINDIR "Sysnative\WindowsPowerShell\v1.0"
+    }
+    else {
+        Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0"
+    }
 
-if "%SFW_SHIM_DEBUG%"=="1" (
-    echo [DEBUG] PATH=%PATH% 1>&2
-    echo [DEBUG] where %TARGET_NAME%: 1>&2
-    "%SystemRoot%\System32\where.exe" "%TARGET_NAME%" 1>&2
-)
+    $knownProfileRoots = @(
+        $nativeWindowsPowerShellRoot,
+        (Join-Path $env:WINDIR "SysWOW64\WindowsPowerShell\v1.0"),
+        (Join-Path $NativeProgramFiles "PowerShell\7")
+    )
 
-for /f "usebackq delims=" %%I in (`"%SystemRoot%\System32\where.exe" "%TARGET_NAME%" 2^>nul`) do (
-    call :consider "%%~fI" "%%~fsI" "%%~dpI" "%%~xI"
-)
+    foreach ($root in $knownProfileRoots) {
+        if (Test-Path $root) {
+            $paths.Add((Join-Path $root "profile.ps1"))
+        }
+    }
 
-if defined TARGET_EXE goto :found
-
-if defined FALLBACK_EXE (
-    set "TARGET_EXE=%FALLBACK_EXE%"
-    goto :found
-)
-
-echo [ERROR] Could not find the real %TARGET_NAME% command on PATH after the Socket Firewall shim. 1>&2
-echo [ERROR] Expected another %TARGET_NAME% executable, .cmd, .bat, or .com outside %SHIM_DIR%. 1>&2
-echo [ERROR] Set SFW_SHIM_DEBUG=1 and run %TARGET_NAME% again to print PATH and where.exe output. 1>&2
-exit /b 9009
-
-:found
-if "%SFW_SHIM_DEBUG%"=="1" echo [DEBUG] selected %TARGET_EXE% 1>&2
-"%SFW_EXE%" "%TARGET_EXE%" %*
-exit /b %ERRORLEVEL%
-
-:consider
-if defined TARGET_EXE exit /b 0
-set "CANDIDATE=%~1"
-set "CANDIDATE_SHORT=%~2"
-set "CANDIDATE_DIR=%~3"
-set "CANDIDATE_EXT=%~4"
-
-if /I "%CANDIDATE_DIR%"=="%SHIM_DIR%\" exit /b 0
-if /I "%CANDIDATE%"=="%SELF%" exit /b 0
-if /I "%CANDIDATE_SHORT%"=="%SELF_SHORT%" exit /b 0
-
-if /I "%CANDIDATE_EXT%"==".exe" set "TARGET_EXE=%CANDIDATE%" & exit /b 0
-if /I "%CANDIDATE_EXT%"==".cmd" set "TARGET_EXE=%CANDIDATE%" & exit /b 0
-if /I "%CANDIDATE_EXT%"==".bat" set "TARGET_EXE=%CANDIDATE%" & exit /b 0
-if /I "%CANDIDATE_EXT%"==".com" set "TARGET_EXE=%CANDIDATE%" & exit /b 0
-
-if not defined FALLBACK_EXE set "FALLBACK_EXE=%CANDIDATE%"
-exit /b 0
-'@
-
-    return $template.Replace('__SFW_EXE__', $SfwPath).Replace('__SHIM_DIR__', $ShimDir).Replace('__TARGET_NAME__', $Manager)
+    $seen = @{}
+    foreach ($path in $paths) {
+        $key = $path.ToLowerInvariant()
+        if (-not $seen.ContainsKey($key)) {
+            $seen[$key] = $true
+            $path
+        }
+    }
 }
 
-function Install-PathWrappers {
+function Install-AllUsersPowerShellShims {
+    $marker = "# >>> socket sfw avd shims >>>"
+    $endMarker = "# <<< socket sfw avd shims <<<"
+    $funcLines = foreach ($manager in $Managers) {
+        "function $manager { & '$SfwPath' $manager @args }"
+    }
+    $block = @"
+$marker
+# Routes package manager commands through Socket Firewall (sfw).
+# Managed by install-sfw-avd.ps1. To disable, delete this block.
+$($funcLines -join "`n")
+$endMarker
+"@
+
+    foreach ($profilePath in Get-AllUsersPowerShellProfilePaths) {
+        $profileDir = Split-Path $profilePath -Parent
+        if (-not (Test-Path $profileDir)) {
+            New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+        }
+
+        $existing = if (Test-Path $profilePath) { Get-Content $profilePath -Raw } else { "" }
+        if ($existing -match [regex]::Escape($marker)) {
+            $pattern = "(?s)" + [regex]::Escape($marker) + ".*?" + [regex]::Escape($endMarker)
+            $updated = [regex]::Replace($existing, $pattern, $block)
+            Set-Content -Path $profilePath -Value $updated -Encoding UTF8
+            Write-Info "Updated sfw shims in all-users PowerShell profile: $profilePath"
+        }
+        else {
+            Add-Content -Path $profilePath -Value "`r`n$block`r`n"
+            Write-Info "Added sfw shims to all-users PowerShell profile: $profilePath"
+        }
+    }
+}
+
+function Install-CmdShimScript {
+    $doskeyLines = @("@echo off")
     foreach ($manager in $Managers) {
-        $wrapperPath = Join-Path $ShimDir "$manager.cmd"
-        Set-Content -Path $wrapperPath -Value (New-WrapperContent -Manager $manager) -Encoding Ascii
-        Write-Info "Wrote PATH wrapper: $wrapperPath"
+        $doskeyLines += "doskey $manager=`"$SfwPath`" $manager `$*"
+    }
+
+    Set-Content -Path $CmdShimPath -Value ($doskeyLines -join "`r`n") -Encoding Ascii
+    Write-Info "Wrote cmd.exe shim script: $CmdShimPath"
+}
+
+function Set-CommandProcessorAutoRun {
+    param([Microsoft.Win32.RegistryView]$RegistryView)
+
+    $autoRunName = "AutoRun"
+    $baseKey = $null
+    $key = $null
+
+    try {
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            $RegistryView
+        )
+        $key = $baseKey.CreateSubKey("Software\Microsoft\Command Processor")
+        $currentAutoRun = [string]$key.GetValue(
+            $autoRunName,
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+
+        $callLine = "CALL `"$CmdShimPath`""
+        if ($currentAutoRun) {
+            if ($currentAutoRun -notmatch [regex]::Escape($CmdShimPath)) {
+                $key.SetValue($autoRunName, "$currentAutoRun & $callLine", [Microsoft.Win32.RegistryValueKind]::String)
+                Write-Info "Appended sfw doskey macros to machine cmd.exe AutoRun ($RegistryView)"
+            }
+            else {
+                Write-Info "Machine cmd.exe AutoRun already registers sfw doskey macros ($RegistryView)"
+            }
+        }
+        else {
+            $key.SetValue($autoRunName, $callLine, [Microsoft.Win32.RegistryValueKind]::String)
+            Write-Info "Registered sfw doskey macros for machine cmd.exe AutoRun ($RegistryView)"
+        }
+    }
+    finally {
+        if ($key) { $key.Close() }
+        if ($baseKey) { $baseKey.Close() }
+    }
+}
+
+function Install-MachineCmdShims {
+    Install-CmdShimScript
+
+    if ([Environment]::Is64BitOperatingSystem) {
+        Set-CommandProcessorAutoRun -RegistryView Registry64
+        Set-CommandProcessorAutoRun -RegistryView Registry32
+    }
+    else {
+        Set-CommandProcessorAutoRun -RegistryView Registry32
     }
 }
 
 function Install-SfwAvd {
     Assert-Windows
     Assert-Administrator
-    New-InstallDirectories
+    New-InstallDirectory
     Install-SfwBinary
-    Install-PathWrappers
     Set-MachinePathForSfw
-    Remove-LegacyAvdShims
+    Remove-LegacyPathWrappers
+    Install-AllUsersPowerShellShims
+    Install-MachineCmdShims
 
-    Write-Info "AVD installation complete."
-    Write-Info "Open a new user session or terminal, then smoke test: 'sfw --version' and 'npm --version'."
+    Write-Info "AVD installation complete. Open a new PowerShell or cmd session to use the shims."
+    Write-Info "Smoke test in a new user session: 'sfw --version', 'npm --version', and 'pip --version'."
 }
 
 try {
