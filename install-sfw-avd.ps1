@@ -373,6 +373,7 @@ function New-WrapperContent {
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 set "SFW_EXE=__SFW_EXE__"
+set "SHIM_DIR=__SHIM_DIR__"
 set "TARGET_NAME=__TARGET_NAME__"
 set "SELF=%~f0"
 set "SELF_SHORT=%~fs0"
@@ -383,14 +384,14 @@ if not exist "%SFW_EXE%" (
     exit /b 1
 )
 
-set "SEARCH_PATH=%PATH%"
-set "SEARCH_PATH=%SEARCH_PATH:__SHIM_DIR__;=%"
-set "SEARCH_PATH=%SEARCH_PATH:;__SHIM_DIR__=;%"
-if /I "%SEARCH_PATH%"=="__SHIM_DIR__" set "SEARCH_PATH="
-set "PATH=%SEARCH_PATH%"
+if "%SFW_SHIM_DEBUG%"=="1" (
+    echo [DEBUG] PATH=%PATH% 1>&2
+    echo [DEBUG] where %TARGET_NAME%: 1>&2
+    "%SystemRoot%\System32\where.exe" "%TARGET_NAME%" 1>&2
+)
 
 for /f "usebackq delims=" %%I in (`"%SystemRoot%\System32\where.exe" "%TARGET_NAME%" 2^>nul`) do (
-    if /I not "%%~fI"=="%SELF%" if /I not "%%~fsI"=="%SELF_SHORT%" (
+    if /I not "%%~dpI"=="%SHIM_DIR%\" if /I not "%%~fI"=="%SELF%" if /I not "%%~fsI"=="%SELF_SHORT%" (
         if /I "%%~xI"==".exe" (
             set "TARGET_EXE=%%~fI"
             goto :found
@@ -410,8 +411,9 @@ for /f "usebackq delims=" %%I in (`"%SystemRoot%\System32\where.exe" "%TARGET_NA
     )
 )
 
-echo [ERROR] Could not find the real %TARGET_NAME% command on PATH after removing the Socket Firewall shim directory. 1>&2
-echo [ERROR] Expected another %TARGET_NAME% executable, .cmd, .bat, or .com later on PATH. 1>&2
+echo [ERROR] Could not find the real %TARGET_NAME% command on PATH after the Socket Firewall shim. 1>&2
+echo [ERROR] Expected another %TARGET_NAME% executable, .cmd, .bat, or .com outside %SHIM_DIR%. 1>&2
+echo [ERROR] Set SFW_SHIM_DEBUG=1 and run %TARGET_NAME% again to print PATH and where.exe output. 1>&2
 exit /b 9009
 
 :found
