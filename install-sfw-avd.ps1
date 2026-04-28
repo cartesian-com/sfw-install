@@ -371,13 +371,14 @@ function New-WrapperContent {
 
     $template = @'
 @echo off
-setlocal EnableExtensions DisableDelayedExpansion
+setlocal EnableExtensions EnableDelayedExpansion
 set "SFW_EXE=__SFW_EXE__"
 set "SHIM_DIR=__SHIM_DIR__"
 set "TARGET_NAME=__TARGET_NAME__"
 set "SELF=%~f0"
 set "SELF_SHORT=%~fs0"
 set "TARGET_EXE="
+set "FALLBACK_EXE="
 
 if not exist "%SFW_EXE%" (
     echo [ERROR] Socket Firewall executable not found: %SFW_EXE% 1>&2
@@ -391,24 +392,34 @@ if "%SFW_SHIM_DEBUG%"=="1" (
 )
 
 for /f "usebackq delims=" %%I in (`"%SystemRoot%\System32\where.exe" "%TARGET_NAME%" 2^>nul`) do (
-    if /I not "%%~dpI"=="%SHIM_DIR%\" if /I not "%%~fI"=="%SELF%" if /I not "%%~fsI"=="%SELF_SHORT%" (
-        if /I "%%~xI"==".exe" (
-            set "TARGET_EXE=%%~fI"
+    set "CANDIDATE=%%~fI"
+    set "CANDIDATE_SHORT=%%~fsI"
+    set "CANDIDATE_DIR=%%~dpI"
+    set "CANDIDATE_EXT=%%~xI"
+    if /I not "!CANDIDATE_DIR!"=="!SHIM_DIR!\" if /I not "!CANDIDATE!"=="!SELF!" if /I not "!CANDIDATE_SHORT!"=="!SELF_SHORT!" (
+        if /I "!CANDIDATE_EXT!"==".exe" (
+            set "TARGET_EXE=!CANDIDATE!"
             goto :found
         )
-        if /I "%%~xI"==".cmd" (
-            set "TARGET_EXE=%%~fI"
+        if /I "!CANDIDATE_EXT!"==".cmd" (
+            set "TARGET_EXE=!CANDIDATE!"
             goto :found
         )
-        if /I "%%~xI"==".bat" (
-            set "TARGET_EXE=%%~fI"
+        if /I "!CANDIDATE_EXT!"==".bat" (
+            set "TARGET_EXE=!CANDIDATE!"
             goto :found
         )
-        if /I "%%~xI"==".com" (
-            set "TARGET_EXE=%%~fI"
+        if /I "!CANDIDATE_EXT!"==".com" (
+            set "TARGET_EXE=!CANDIDATE!"
             goto :found
         )
+        if not defined FALLBACK_EXE set "FALLBACK_EXE=!CANDIDATE!"
     )
+)
+
+if defined FALLBACK_EXE (
+    set "TARGET_EXE=%FALLBACK_EXE%"
+    goto :found
 )
 
 echo [ERROR] Could not find the real %TARGET_NAME% command on PATH after the Socket Firewall shim. 1>&2
@@ -417,6 +428,7 @@ echo [ERROR] Set SFW_SHIM_DEBUG=1 and run %TARGET_NAME% again to print PATH and 
 exit /b 9009
 
 :found
+if "%SFW_SHIM_DEBUG%"=="1" echo [DEBUG] selected %TARGET_EXE% 1>&2
 "%SFW_EXE%" "%TARGET_EXE%" %*
 exit /b %ERRORLEVEL%
 '@
