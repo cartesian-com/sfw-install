@@ -371,7 +371,7 @@ function New-WrapperContent {
 
     $template = @'
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal EnableExtensions DisableDelayedExpansion
 set "SFW_EXE=__SFW_EXE__"
 set "SHIM_DIR=__SHIM_DIR__"
 set "TARGET_NAME=__TARGET_NAME__"
@@ -392,30 +392,10 @@ if "%SFW_SHIM_DEBUG%"=="1" (
 )
 
 for /f "usebackq delims=" %%I in (`"%SystemRoot%\System32\where.exe" "%TARGET_NAME%" 2^>nul`) do (
-    set "CANDIDATE=%%~fI"
-    set "CANDIDATE_SHORT=%%~fsI"
-    set "CANDIDATE_DIR=%%~dpI"
-    set "CANDIDATE_EXT=%%~xI"
-    if /I not "!CANDIDATE_DIR!"=="!SHIM_DIR!\" if /I not "!CANDIDATE!"=="!SELF!" if /I not "!CANDIDATE_SHORT!"=="!SELF_SHORT!" (
-        if /I "!CANDIDATE_EXT!"==".exe" (
-            set "TARGET_EXE=!CANDIDATE!"
-            goto :found
-        )
-        if /I "!CANDIDATE_EXT!"==".cmd" (
-            set "TARGET_EXE=!CANDIDATE!"
-            goto :found
-        )
-        if /I "!CANDIDATE_EXT!"==".bat" (
-            set "TARGET_EXE=!CANDIDATE!"
-            goto :found
-        )
-        if /I "!CANDIDATE_EXT!"==".com" (
-            set "TARGET_EXE=!CANDIDATE!"
-            goto :found
-        )
-        if not defined FALLBACK_EXE set "FALLBACK_EXE=!CANDIDATE!"
-    )
+    call :consider "%%~fI" "%%~fsI" "%%~dpI" "%%~xI"
 )
+
+if defined TARGET_EXE goto :found
 
 if defined FALLBACK_EXE (
     set "TARGET_EXE=%FALLBACK_EXE%"
@@ -431,6 +411,25 @@ exit /b 9009
 if "%SFW_SHIM_DEBUG%"=="1" echo [DEBUG] selected %TARGET_EXE% 1>&2
 "%SFW_EXE%" "%TARGET_EXE%" %*
 exit /b %ERRORLEVEL%
+
+:consider
+if defined TARGET_EXE exit /b 0
+set "CANDIDATE=%~1"
+set "CANDIDATE_SHORT=%~2"
+set "CANDIDATE_DIR=%~3"
+set "CANDIDATE_EXT=%~4"
+
+if /I "%CANDIDATE_DIR%"=="%SHIM_DIR%\" exit /b 0
+if /I "%CANDIDATE%"=="%SELF%" exit /b 0
+if /I "%CANDIDATE_SHORT%"=="%SELF_SHORT%" exit /b 0
+
+if /I "%CANDIDATE_EXT%"==".exe" set "TARGET_EXE=%CANDIDATE%" & exit /b 0
+if /I "%CANDIDATE_EXT%"==".cmd" set "TARGET_EXE=%CANDIDATE%" & exit /b 0
+if /I "%CANDIDATE_EXT%"==".bat" set "TARGET_EXE=%CANDIDATE%" & exit /b 0
+if /I "%CANDIDATE_EXT%"==".com" set "TARGET_EXE=%CANDIDATE%" & exit /b 0
+
+if not defined FALLBACK_EXE set "FALLBACK_EXE=%CANDIDATE%"
+exit /b 0
 '@
 
     return $template.Replace('__SFW_EXE__', $SfwPath).Replace('__SHIM_DIR__', $ShimDir).Replace('__TARGET_NAME__', $Manager)
