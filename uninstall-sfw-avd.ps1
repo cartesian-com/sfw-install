@@ -55,12 +55,10 @@ function Normalize-PathEntry {
     return $PathEntry.Trim().Trim('"').TrimEnd('\').ToLowerInvariant()
 }
 
-function Remove-FromMachinePath {
-    $current = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    if (-not $current) {
-        Write-Info "Machine PATH is empty; nothing to remove."
-        return
-    }
+function Get-PathWithoutSfw {
+    param([string]$PathValue)
+
+    if (-not $PathValue) { return "" }
 
     $remove = @($ShimDir, $BinDir)
     $removeKeys = @{}
@@ -68,7 +66,7 @@ function Remove-FromMachinePath {
         $removeKeys[(Normalize-PathEntry $path)] = $true
     }
 
-    $existing = $current.Split(';', [StringSplitOptions]::RemoveEmptyEntries)
+    $existing = $PathValue.Split(';', [StringSplitOptions]::RemoveEmptyEntries)
     $filtered = foreach ($entry in $existing) {
         $key = Normalize-PathEntry $entry
         if (-not $removeKeys.ContainsKey($key)) {
@@ -76,10 +74,20 @@ function Remove-FromMachinePath {
         }
     }
 
-    $newPath = @($filtered) -join ';'
+    return (@($filtered) -join ';')
+}
+
+function Remove-FromMachinePath {
+    $current = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if (-not $current) {
+        Write-Info "Machine PATH is empty; nothing to remove."
+        return
+    }
+
+    $newPath = Get-PathWithoutSfw $current
     if ($newPath -ne $current) {
         [Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
-        $env:Path = $newPath
+        $env:Path = Get-PathWithoutSfw $env:Path
         Write-Info "Removed sfw shim and binary directories from machine PATH"
     }
     else {

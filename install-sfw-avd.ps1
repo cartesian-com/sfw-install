@@ -144,9 +144,10 @@ function Normalize-PathEntry {
     return $PathEntry.Trim().Trim('"').TrimEnd('\').ToLowerInvariant()
 }
 
-function Set-MachinePathForSfw {
-    $current = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    if (-not $current) { $current = "" }
+function Get-PathWithSfwFirst {
+    param([string]$PathValue)
+
+    if (-not $PathValue) { $PathValue = "" }
 
     $preferred = @($ShimDir, $BinDir)
     $preferredKeys = @{}
@@ -154,7 +155,7 @@ function Set-MachinePathForSfw {
         $preferredKeys[(Normalize-PathEntry $path)] = $true
     }
 
-    $existing = $current.Split(';', [StringSplitOptions]::RemoveEmptyEntries)
+    $existing = $PathValue.Split(';', [StringSplitOptions]::RemoveEmptyEntries)
     $filtered = foreach ($entry in $existing) {
         $key = Normalize-PathEntry $entry
         if (-not $preferredKeys.ContainsKey($key)) {
@@ -163,7 +164,12 @@ function Set-MachinePathForSfw {
     }
 
     $newParts = @($ShimDir, $BinDir) + @($filtered)
-    $newPath = $newParts -join ';'
+    return ($newParts -join ';')
+}
+
+function Set-MachinePathForSfw {
+    $current = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $newPath = Get-PathWithSfwFirst $current
 
     if ($newPath -ne $current) {
         [Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
@@ -173,7 +179,7 @@ function Set-MachinePathForSfw {
         Write-Info "sfw shim and binary directories are already first on machine PATH"
     }
 
-    $env:Path = $newPath
+    $env:Path = Get-PathWithSfwFirst $env:Path
 }
 
 function Get-LegacyAllUsersPowerShellProfilePaths {
@@ -377,6 +383,12 @@ if not exist "%SFW_EXE%" (
     exit /b 1
 )
 
+set "SEARCH_PATH=%PATH%"
+set "SEARCH_PATH=%SEARCH_PATH:__SHIM_DIR__;=%"
+set "SEARCH_PATH=%SEARCH_PATH:;__SHIM_DIR__=;%"
+if /I "%SEARCH_PATH%"=="__SHIM_DIR__" set "SEARCH_PATH="
+set "PATH=%SEARCH_PATH%"
+
 for /f "usebackq delims=" %%I in (`"%SystemRoot%\System32\where.exe" "%TARGET_NAME%" 2^>nul`) do (
     if /I not "%%~fI"=="%SELF%" if /I not "%%~fsI"=="%SELF_SHORT%" (
         if /I "%%~xI"==".exe" (
@@ -398,7 +410,8 @@ for /f "usebackq delims=" %%I in (`"%SystemRoot%\System32\where.exe" "%TARGET_NA
     )
 )
 
-echo [ERROR] Could not find the real %TARGET_NAME% command on PATH after the Socket Firewall shim. 1>&2
+echo [ERROR] Could not find the real %TARGET_NAME% command on PATH after removing the Socket Firewall shim directory. 1>&2
+echo [ERROR] Expected another %TARGET_NAME% executable, .cmd, .bat, or .com later on PATH. 1>&2
 exit /b 9009
 
 :found
@@ -406,7 +419,7 @@ exit /b 9009
 exit /b %ERRORLEVEL%
 '@
 
-    return $template.Replace('__SFW_EXE__', $SfwPath).Replace('__TARGET_NAME__', $Manager)
+    return $template.Replace('__SFW_EXE__', $SfwPath).Replace('__SHIM_DIR__', $ShimDir).Replace('__TARGET_NAME__', $Manager)
 }
 
 function Install-PathWrappers {
